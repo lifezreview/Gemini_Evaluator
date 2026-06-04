@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Dynamic Holding AI Optimizer", layout="wide")
 st.title("🎯 Dynamic Stock Holding Horizon AI Optimizer")
-st.markdown("Enter a ticker symbol below. The AI sweeps through multiple historical holding dimensions to determine the precise window that yields the **maximum mathematical percentage return**.")
+st.markdown("Enter a ticker symbol below. This price-agnostic AI normalizes market trends to calculate the optimal holding period based purely on relative momentum cycles.")
 
 # --- AUTOMATED SENTIMENT ENGINE ---
 def calculate_automated_sentiment(symbol):
@@ -50,7 +50,7 @@ def calculate_automated_sentiment(symbol):
     except Exception:
         return 0.05, ["Sentiment engine bypass optimized. Running baseline configurations."]
 
-# --- NATIVE EMULATED DATA INGESTION ---
+# --- NATIVE EMULATED DATA INGESTION & STATIONARY FEATURE ENGINEERING ---
 @st.cache_data(ttl=1800)
 def load_and_process_data(symbol):
     try:
@@ -69,9 +69,6 @@ def load_and_process_data(symbol):
         
         closes = quote_indicators['close']
         volumes = quote_indicators['volume']
-        opens = quote_indicators['open']
-        highs = quote_indicators['high']
-        lows = quote_indicators['low']
         
         adjclose_node = result_node['indicators'].get('adjclose', [{}])[0].get('adjclose', None)
         if adjclose_node is not None:
@@ -79,26 +76,29 @@ def load_and_process_data(symbol):
             
         df = pd.DataFrame({
             'Close': closes,
-            'Volume': volumes,
-            'Open': opens,
-            'High': highs,
-            'Low': lows
+            'Volume': volumes
         }, index=pd.to_datetime(timestamps, unit='s'))
         
         df.dropna(subset=['Close', 'Volume'], inplace=True)
         if df.empty:
             return None
             
-        # Feature Engineering Structural Setup
-        df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
-        df['Force_Index'] = (df['Close'].diff(1) * df['Volume']).fillna(0)
+        # --- CRITICAL FIX: STATIONARY FEATURE MATRIX (No Raw Dollar Values allowed) ---
+        df['Price_Return'] = df['Close'].pct_change()
+        df['Volume_Return'] = df['Volume'].pct_change()
         
+        # 1. Normalized Moving Average Distance
+        ma_5 = df['Close'].rolling(window=5).mean()
+        df['MA_5_Dist'] = (df['Close'] - ma_5) / ma_5
+        
+        # 2. Bounded Relative Strength Index (RSI)
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         df['RSI'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
-        df['MA_5'] = df['Close'].rolling(window=5).mean()
-        df['Price_Return'] = df['Close'].pct_change()
+        
+        # 3. Normalized Volatility Metric (5-day rolling standard deviation of returns)
+        df['Volatility'] = df['Price_Return'].rolling(window=5).std()
         
         df.dropna(inplace=True)
         return df
@@ -114,20 +114,22 @@ def evaluate_optimal_holding_period(df, computed_sentiment):
         "6 Months": 126
     }
     
-    features = ['Close', 'Volume', 'OBV', 'Force_Index', 'RSI', 'MA_5', 'Price_Return']
+    # Purely stationary inputs that remain stable even at all-time highs
+    features = ['Price_Return', 'Volume_Return', 'MA_5_Dist', 'RSI', 'Volatility']
     base_df = df.copy()
     base_df['Sentiment_Vector'] = computed_sentiment
     features_with_sent = features + ['Sentiment_Vector']
     
+    # Store today's current configuration to run the final projection
     latest_market_snapshot = base_df[features_with_sent].iloc[-1:]
-    current_price = float(latest_market_snapshot['Close'].iloc[0])
+    current_price = float(base_df['Close'].iloc[-1])
     
     horizon_results = {}
     
     for label, days in holding_profiles.items():
         loop_df = base_df.copy()
         
-        # FIX: Instead of raw target price, target is now the forward delta percentage return
+        # Target calculation: Forward percentage return
         future_price = loop_df['Close'].shift(-days)
         loop_df['Target'] = (future_price - loop_df['Close']) / loop_df['Close']
         
@@ -140,13 +142,14 @@ def evaluate_optimal_holding_period(df, computed_sentiment):
         
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.15, shuffle=False)
         
-        model = xgb.XGBRegressor(n_estimators=80, max_depth=3, learning_rate=0.05, objective='reg:squarederror', random_state=42)
+        # Tuned hyperparameters to prevent over-fitting on highly volatile assets
+        model = xgb.XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.05, objective='reg:squarederror', random_state=42)
         model.fit(X_train, y_train)
         
         preds = model.predict(X_test)
         r2 = r2_score(y_test, preds)
         
-        # FIX: Decode the percentage prediction back out safely to map future values
+        # Generate prediction based on normalized baseline features
         pred_pct_gain = float(model.predict(latest_market_snapshot)[0])
         future_projection = current_price * (1 + pred_pct_gain)
         pct_gain = pred_pct_gain * 100
@@ -165,7 +168,7 @@ with st.form("optimizer_form"):
     submit_button = st.form_submit_button("Compute Peak Holding Windows")
 
 if ticker:
-    with st.spinner(f"Initiating algorithmic multi-horizon analysis for {ticker}..."):
+    with st.spinner(f"Initiating price-agnostic multi-horizon analysis for {ticker}..."):
         automated_sentiment, headlines = calculate_automated_sentiment(ticker)
         data = load_and_process_data(ticker)
         
@@ -177,13 +180,16 @@ if ticker:
             best_metrics = results[best_horizon]
             
             # --- RENDER MAIN ALGORITHMIC RECOMMENDATION BANNER ---
-            st.success(f"### 🤖 AI Strategic Recommendation for {ticker}")
+            if best_metrics['percentage_gain'] >= 0:
+                st.success(f"### 🤖 AI Strategic Recommendation for {ticker}")
+            else:
+                st.warning(f"### 🤖 AI Defensive Recommendation for {ticker} (Risk Detected Across All Windows)")
             
             rec_col1, rec_col2, rec_col3 = st.columns(3)
             with rec_col1:
                 st.metric(label="Optimal Holding Horizon", value=best_horizon)
             with rec_col2:
-                st.metric(label="Projected Peak Return", value=f"{best_metrics['percentage_gain']:.2f}%")
+                st.metric(label="Projected Optimal Return", value=f"{best_metrics['percentage_gain']:.2f}%")
             with rec_col3:
                 st.metric(label="Target Price Projection", value=f"${best_metrics['predicted_price']:.2f}")
                 
