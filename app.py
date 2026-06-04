@@ -107,8 +107,6 @@ def load_and_process_data(symbol):
 
 # --- MULTI-HORIZON MACHINE LEARNING SCANNER ---
 def evaluate_optimal_holding_period(df, computed_sentiment):
-    """Trains individual predictive vectors across multiple timelines to locate peak returns"""
-    # Horizons defined by market trading days
     holding_profiles = {
         "1 Week": 5,
         "1 Month": 21,
@@ -121,7 +119,6 @@ def evaluate_optimal_holding_period(df, computed_sentiment):
     base_df['Sentiment_Vector'] = computed_sentiment
     features_with_sent = features + ['Sentiment_Vector']
     
-    # Extract the absolute newest row representing today's structural indicators
     latest_market_snapshot = base_df[features_with_sent].iloc[-1:]
     current_price = float(latest_market_snapshot['Close'].iloc[0])
     
@@ -129,29 +126,30 @@ def evaluate_optimal_holding_period(df, computed_sentiment):
     
     for label, days in holding_profiles.items():
         loop_df = base_df.copy()
-        # Shift target parameters forward by the specific horizon matrix
-        loop_df['Target'] = loop_df['Close'].shift(-days)
+        
+        # FIX: Instead of raw target price, target is now the forward delta percentage return
+        future_price = loop_df['Close'].shift(-days)
+        loop_df['Target'] = (future_price - loop_df['Close']) / loop_df['Close']
         
         cleaned_ml_df = loop_df.dropna(subset=['Target'] + features_with_sent)
         if len(cleaned_ml_df) < 50:
-            continue  # Ensure database length supports training constraints
+            continue
             
         X = cleaned_ml_df[features_with_sent]
         y = cleaned_ml_df['Target']
         
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.15, shuffle=False)
         
-        # Hyperparameters optimized for rapid, multi-model execution loops
-        model = xgb.XGBRegressor(n_estimators=60, max_depth=3, learning_rate=0.06, objective='reg:squarederror', random_state=42)
+        model = xgb.XGBRegressor(n_estimators=80, max_depth=3, learning_rate=0.05, objective='reg:squarederror', random_state=42)
         model.fit(X_train, y_train)
         
-        # Score testing accuracy
         preds = model.predict(X_test)
         r2 = r2_score(y_test, preds)
         
-        # Project forward from today's real data point
-        future_projection = float(model.predict(latest_market_snapshot)[0])
-        pct_gain = ((future_projection - current_price) / current_price) * 100
+        # FIX: Decode the percentage prediction back out safely to map future values
+        pred_pct_gain = float(model.predict(latest_market_snapshot)[0])
+        future_projection = current_price * (1 + pred_pct_gain)
+        pct_gain = pred_pct_gain * 100
         
         horizon_results[label] = {
             "predicted_price": future_projection,
@@ -163,7 +161,7 @@ def evaluate_optimal_holding_period(df, computed_sentiment):
 
 # --- UI CONTROL INTERFACE ---
 with st.form("optimizer_form"):
-    ticker = st.text_input("Enter Stock Ticker Symbol (e.g. ASML, AAPL, NVDA):", value="ASML").upper()
+    ticker = st.text_input("Enter Stock Ticker Symbol (e.g. AAPL, NVDA, ASML):", value="AAPL").upper()
     submit_button = st.form_submit_button("Compute Peak Holding Windows")
 
 if ticker:
@@ -175,7 +173,6 @@ if ticker:
         current_close, results = evaluate_optimal_holding_period(data, automated_sentiment)
         
         if results:
-            # Locate the max gain key programmatically
             best_horizon = max(results, key=lambda k: results[k]['percentage_gain'])
             best_metrics = results[best_horizon]
             
@@ -194,7 +191,6 @@ if ticker:
             st.subheader("📊 Comparative Horizon Breakdown Matrix")
             st.markdown("The values below illustrate how the asset's momentum vectors scale across progressive historical holding thresholds.")
             
-            # Compile summary dataset matrix
             matrix_data = []
             for h_name, h_info in results.items():
                 matrix_data.append({
@@ -206,18 +202,16 @@ if ticker:
             st.table(pd.DataFrame(matrix_data))
             
             # --- INTERACTIVE COMPARATIVE PLOT ---
-            st.subheader("Visualized Holding Vector Vectors")
+            st.subheader("Visualized Holding Return Vectors")
             horizons_list = list(results.keys())
             gains_list = [results[h]['percentage_gain'] for h in horizons_list]
             
             fig = go.Figure()
-            # Dynamic color configurations based on return states
             colors = ['#2ca02c' if g >= 0 else '#d62728' for g in gains_list]
             fig.add_trace(go.Bar(x=horizons_list, y=gains_list, marker_color=colors, text=[f"{g:.1f}%" for g in gains_list], textposition='auto'))
             fig.update_layout(template="plotly_dark", yaxis_title="Projected Return (%)", xaxis_title="Holding Horizon", margin=dict(l=20, r=20, t=20, b=20), height=300)
             st.plotly_chart(fig, use_container_width=True)
             
-            # --- NLP AUDIT EXPANDER ---
             with st.expander("View Real-Time Scraped Headlines Evaluated"):
                 st.write(f"**Computed Sentiment Vector Injected:** {automated_sentiment}")
                 for hl in headlines:
